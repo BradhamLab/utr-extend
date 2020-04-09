@@ -7,10 +7,10 @@ shell.prefix('source activate alignment; ')
 
 lib_match = config['params']['library_regex']
 # change this
-LIBRARIES = [os.path.basename(x).split('.')[0]\
-             for x in glob(os.path.join(config['dir']['data'] + f'*{lib_match}*'))]
-# LIBRARIES = ['L001', 'L002', 'L003', 'L004']
+FASTQS = [x for x in glob(os.path.join(config['dir']['data'] + f'*{lib_match}*'))]
+LIBRARIES = [os.path.basename(x).replace('_cdna.fastq', '') for x in FASTQS]
 
+print(LIBRARIES)
 rule all:
     input:
         os.path.join(config['dir']['out'], 'results',
@@ -22,29 +22,30 @@ rule gtf_to_bed:
     input:
         gtf=config['genome']['gtf']
     output:
-        bed=temp(os.path.join(config['dir']['out'], 'annotations',
-                              'annotations.bed'))
+        bed=os.path.join(config['dir']['out'], 'annotations',
+                         'annotations.bed')
     shell:
         'gtf2bed < {input.gtf} > {output.bed}'
-
-rule exon_annos:
-    input:
-        bed=os.path.join(config['dir']['out'], 'annotations', 'annotations.bed')
-    output:
-        bed=temp(os.path.join(config['dir']['out'], 'annotations',
-                'exon.annotations.bed'))
-    shell:
-        "awk '{{if ($8 ~ /exon/) {{ print }} }}' {input} > {output}"
 
 rule sort_annotations:
     input:
         bed=os.path.join(config['dir']['out'], 'annotations',
-                         'exon.annotations.bed')
+                         'annotations.bed')
     output:
         bed=os.path.join(config['dir']['out'], 'annotations',
-                         'sorted.exon.annotations.bed')
+                         'sorted.annotations.bed')
     shell:
         'sort -k1,1 -k2,2n {input.bed} > {output.bed}'
+
+rule extract_exon_annotations:
+    input:
+        bed=os.path.join(config['dir']['out'], 'annotations',
+                         'sorted.annotations.bed')
+    output:
+        bed=os.path.join(config['dir']['out'], 'annotations',
+                'exon.annotations.bed')
+    shell:
+        "awk '{{if ($8 ~ /exon/) {{ print }} }}' {input} > {output}"
 
 rule build_star_index:
     input:
@@ -62,7 +63,8 @@ rule build_star_index:
 
 rule combine_fastq:
     input:
-        fastq=expand(os.path.join(config['dir']['data'], '{library}' + '.fastq'),
+        fastq=expand(os.path.join(config['dir']['data'], '{library}' +
+                     '_cdna.fastq'),
                      library=LIBRARIES)
     output:
         fastq=os.path.join(config['dir']['out'], 'fastq', 'combined.fastq')
@@ -72,12 +74,12 @@ rule combine_fastq:
 rule align_3_prime_utr_reads:
     input:
         index=os.path.join(config['STAR']['index'], 'Genome'),
-        fastq=os.path.join(config['dir']['out'], 'fastq', 'combined.fastq')
+        fastq=os.path.join(config['dir']['data'], '{library}' + '.fastq')
     output:
-        sam=temp(os.path.join(config['dir']['out'], "STAR", "Aligned.out.sam"))
+        sam=os.path.join(config['dir']['out'], "STAR", "{library}","Aligned.out.sam")
     params:
         index=os.path.join(config['STAR']['index']),
-        prefix=os.path.join(config['dir']['out'], "STAR") + '/'
+        prefix=os.path.join(config['dir']['out'], "STAR", "{library}") + '/'
     shell:
         'STAR --runMode alignReads --outSAMtype SAM --readFilesCommand zcat '
         '--genomeDir {params.index} --outFileNamePrefix {params.prefix} '
@@ -85,42 +87,60 @@ rule align_3_prime_utr_reads:
 
 rule sam_to_bed:
     input:
-        sam=os.path.join(config['dir']['out'], "STAR", "Aligned.out.sam")
+        sam=os.path.join(config['dir']['out'], "STAR",
+                         "{library}","Aligned.out.sam")
     output:
-        bed=temp(os.path.join(config['dir']['out'], 'bed', 'aligned.bed'))
+        bed=temp(os.path.join(config['dir']['out'], 'bed', '{library}',
+                              'aligned.bed'))
     shell:
         'sam2bed < {input.sam} > {output.bed}'
 
 rule sort_alignment_bed:
     input:
-        bed=os.path.join(config['dir']['out'], 'bed', 'aligned.bed')
+        bed=os.path.join(config['dir']['out'], 'bed', '{library}',
+                         'aligned.bed')
     output:
-        bed=os.path.join(config['dir']['out'], 'bed', 'aligned.sorted.bed')
+        bed=os.path.join(config['dir']['out'], 'bed', '{library}',
+                        'aligned.sorted.bed')
     shell:
         'sort -k1,1 -k2,2n {input.bed} > {output.bed}'
 
-rule remove_matched:
+rule remove_annotated:
     input:
-        bed=os.path.join(config['dir']['out'], 'bed', 'aligned.sorted.bed'),
+        bed=os.path.join(config['dir']['out'], 'bed', '{library}',
+                         'aligned.sorted.bed'),
         ref=os.path.join(config['dir']['out'], 'annotations',
-                         'sorted.exon.annotations.bed')
+                         'sorted.annotations.bed')
     output:
-        bed=os.path.join(config['dir']['out'], 'bed', 'unannotated.bed')
+        bed=os.path.join(config['dir']['out'], 'bed', '{library}',
+                         'unannotated.bed')
     shell:
         'bedtools subtract -a {input.bed} -b {input.ref} -s -A > {output.bed}'
 
+# should still be sorted
+rule combine_unannotated:
+    input:
+        bed=expand(os.path.join(config['dir']['out'], 'bed', '{library}',
+                            'unannotated.bed'),
+                   library=LIBRARIES)
+    output:
+        bed=os.path.join(config['dir']['out'], 'bed', 'combined.bed')
+    shell:
+        'bodops -u {input.bed} > {output.bed}'
+
 rule merge_missed_alignments:
     input:
-        bed=os.path.join(config['dir']['out'], 'bed', 'unannotated.bed')
+        bed=os.path.join(config['dir']['out'], 'bed', 'combined.bed')
     output:
-        bed=temp(os.path.join(config['dir']['out'], 'bed', 'merged.bed'))
+        bed=os.path.join(config['dir']['out'], 'bed', 'merged.bed')
     shell:
-        'bedtools merge -i {input.bed} -s -c 4,5,6 -o count,distinct,distinct'
+        'bedtools merge -i {input.bed} -s -c 4,5,6 -o count,distinct,distinct '
+        '> {output.bed}'
 
 rule find_closest:
     input:
         ref=os.path.join(config['dir']['out'], 'annotations',
-                         'sorted.exon.annotations.bed'),
+                         'exon.annotations.bed'),
         bed=os.path.join(config['dir']['out'], 'bed',
                          'merged.bed')
     output:
