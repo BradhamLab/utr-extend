@@ -20,7 +20,7 @@ rule all:
 
 rule gtf_to_bed:
     input:
-        gtf=config['genome']['gff']
+        gtf=config['genome']['gtf']
     output:
         bed=temp(os.path.join(config['dir']['out'], 'annotations',
                               'annotations.bed'))
@@ -49,7 +49,7 @@ rule sort_annotations:
 rule build_star_index:
     input:
         fasta=config['genome']['fasta'],
-        gff3=config['genome']['gtf'],
+        gtf=config['genome']['gtf'],
     params:
         index_dir=config['STAR']['index'],
         chr_n_bits=utils.estimate_STAR_ChrBinNbits(config['genome']['fasta'], 60),
