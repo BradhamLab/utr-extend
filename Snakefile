@@ -8,16 +8,26 @@ shell.prefix('source activate alignment; ')
 
 lib_match = re.compile(config['params']['library_regex'])
 bio_reads = config['params']['cdna_match']
-# change this
+
+
 FASTQS = [x for x in glob(os.path.join(config['dir']['data']\
           + f'*{bio_reads}*'))]
+
+fastq_in = {'.fastq': 'cat',
+           '.gz': 'zcat'}
+
+read_fastq = fastq_in[os.path.splitext(FASTQS[0])[-1]]
 library_dict = {}
 LIBRARIES = []
 for each in FASTQS:
     library = lib_match.search(os.path.basename(each)).group(0)
     library_dict[library] = each
     LIBRARIES.append(library)
-print(LIBRARIES)
+
+msg = "\nIdentified libraries: {}\n\n".format(", ".join(LIBRARIES))\
+    + "Expanding 3' UTR regions using reads from:\n\t{}.\n\n".format(
+      "\n\t".join(FASTQS)) + "Fastq read command: {}\n".format(read_fastq) 
+print(msg)
 
 def fastq_input(wildcards):
     fastq = library_dict[wildcards.library]
@@ -80,10 +90,11 @@ rule align_3_prime_utr_reads:
                          "Aligned.sortedByCoord.out.bam")
     params:
         index=os.path.join(config['STAR']['index']),
-        prefix=os.path.join(config['dir']['out'], "STAR", "{library}") + '/'
+        prefix=os.path.join(config['dir']['out'], "STAR", "{library}") + '/',
+        read=read_fastq
     shell:
         'STAR --runMode alignReads --outSAMtype BAM SortedByCoordinate '
-        '--readFilesCommand zcat --genomeDir {params.index} --outFileNamePrefix '
+        '--readFilesCommand {params.read} --genomeDir {params.index} --outFileNamePrefix '
         '{params.prefix} --readFilesIn {input.fastq} --outReadsUnmapped FASTX'
 
 # switch sam to sorted bam
@@ -106,7 +117,10 @@ rule sort_alignment_bed:
                          'sorted.aligned.bed'))
     shell:
         'sort -k1,1 -k2,2n {input.bed} > {output.bed}'
-    
+
+# Do not ignore overlaps -- this will not 'filter out' reads already aligned to
+# exons; instead it will report the upstream exon. Reads already mapped to exons
+# should be removed during filtering
 rule find_closest:
     input:
         ref=os.path.join(config['dir']['out'], 'annotations',
@@ -115,26 +129,32 @@ rule find_closest:
                          'sorted.aligned.bed'))
     output:
         temp(os.path.join(config['dir']['out'], 'results', '{library}',
-                    'bedtools.closet.out'))
+                          'bedtools.closest.out'))
     shell:
-        "bedtools closest -a {input.bed} -b {input.ref} -D b -io -iu -s > {output}"
+        "bedtools closest -a {input.bed} -b {input.ref} -D b -iu -s > {output}"
 
+# remove alignments with zero distance -- already aligned to exon
+# remove alignment more than maximum distance away
+# remove alignments where | align.start - exon.start | > max dist and
+# vice versa for end coordinates -- required for spliced alignments. 
 rule filter_closest:
     input:
         os.path.join(config['dir']['out'], 'results', '{library}',
-                        'bedtools.closet.out')
+                        'bedtools.closest.out')
     output:
         temp(os.path.join(config['dir']['out'], 'results', '{library}',
-                     'merged.closest.out'))
+                          'filtered.closest.out'))
     params:
         bp=config['params']['bp']
     shell:
-        "awk '{{if ($10 !~ /\./ && $NF <= {params.bp}) {{ print }} }}' {input} > {output}"
+        "awk '{{if ($10 !~ /\./ && $NF <= {params.bp} && $NF > 0 && "
+        "sqrt(($2 - $8)^2) < {params.bp} && sqrt(($3 - $9)^2) < {params.bp} ) "
+        "{{ print }} }}' {input} > {output}"
 
 rule combine_libraries:
     input:
         expand(os.path.join(config['dir']['out'], 'results', '{library}',
-                     'merged.closest.out'), library=LIBRARIES)
+                     'filtered.closest.out'), library=LIBRARIES)
     output:
         temp(os.path.join(config['dir']['out'], 'results', 'combined.out'))
     shell:
