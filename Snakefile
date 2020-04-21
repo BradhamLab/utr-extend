@@ -1,3 +1,4 @@
+import re
 from glob import glob
 import os
 import utils
@@ -5,27 +6,36 @@ import utils
 configfile: 'config.yaml'
 shell.prefix('source activate alignment; ')
 
-lib_match = config['params']['library_regex']
+lib_match = re.compile(config['params']['library_regex'])
+bio_reads = config['params']['cdna_match']
 # change this
-FASTQS = [x for x in glob(os.path.join(config['dir']['data'] + f'*{lib_match}*'))]
-LIBRARIES = [os.path.basename(x).replace('_cdna.fastq', '') for x in FASTQS]
-
+FASTQS = [x for x in glob(os.path.join(config['dir']['data']\
+          + f'*{bio_reads}*'))]
+library_dict = {}
+LIBRARIES = []
+for each in FASTQS:
+    library = lib_match.search(os.path.basename(each)).group(0)
+    library_dict[library] = each
+    LIBRARIES.append(library)
 print(LIBRARIES)
+
+def fastq_input(wildcards):
+    fastq = library_dict[wildcards.library]
+    return "{library}".join(lib_match.split(fastq))
+
 rule all:
     input:
         os.path.join(config['dir']['out'], 'results',
-                    'filtered.matched.bedtools.closest.out'),
-        os.path.join(config['dir']['out'], 'results',
-                    'unmatched.bedtools.closest.out'),
+                     '3_prime_alignments.out')
 
-rule gtf_to_bed:
+rule gff_to_bed:
     input:
-        gtf=config['genome']['gtf']
+        gtf=config['genome']['gff']
     output:
         bed=os.path.join(config['dir']['out'], 'annotations',
                          'annotations.bed')
     shell:
-        'gtf2bed < {input.gtf} > {output.bed}'
+        'gff2bed < {input.gtf} > {output.bed}'
 
 rule sort_annotations:
     input:
@@ -61,122 +71,82 @@ rule build_star_index:
         "--genomeFastaFiles {input.fasta} --sjdbGTFfile {input.gtf} "
         "--sjdbOverhang 60 --genomeChrBinNbits {params.chr_n_bits}"
 
-rule combine_fastq:
-    input:
-        fastq=expand(os.path.join(config['dir']['data'], '{library}' +
-                     '_cdna.fastq'),
-                     library=LIBRARIES)
-    output:
-        fastq=os.path.join(config['dir']['out'], 'fastq', 'combined.fastq')
-    shell:
-        "cat {input.fastq} > {output.fastq}"
-
 rule align_3_prime_utr_reads:
     input:
         index=os.path.join(config['STAR']['index'], 'Genome'),
-        fastq=os.path.join(config['dir']['data'], '{library}' + '.fastq')
+        fastq=lambda wildcards: fastq_input(wildcards)
     output:
-        sam=os.path.join(config['dir']['out'], "STAR", "{library}","Aligned.out.sam")
+        bam=os.path.join(config['dir']['out'], "STAR", "{library}",
+                         "Aligned.sortedByCoord.out.bam")
     params:
         index=os.path.join(config['STAR']['index']),
         prefix=os.path.join(config['dir']['out'], "STAR", "{library}") + '/'
     shell:
-        'STAR --runMode alignReads --outSAMtype SAM --readFilesCommand zcat '
-        '--genomeDir {params.index} --outFileNamePrefix {params.prefix} '
-        '--readFilesIn {input.fastq} --outReadsUnmapped FASTX'
+        'STAR --runMode alignReads --outSAMtype BAM SortedByCoordinate '
+        '--readFilesCommand zcat --genomeDir {params.index} --outFileNamePrefix '
+        '{params.prefix} --readFilesIn {input.fastq} --outReadsUnmapped FASTX'
 
-rule sam_to_bed:
+# switch sam to sorted bam
+rule bam_to_bed:
     input:
-        sam=os.path.join(config['dir']['out'], "STAR",
-                         "{library}","Aligned.out.sam")
+        bam=os.path.join(config['dir']['out'], "STAR",
+                         "{library}", "Aligned.sortedByCoord.out.bam")
     output:
         bed=temp(os.path.join(config['dir']['out'], 'bed', '{library}',
                               'aligned.bed'))
     shell:
-        'sam2bed < {input.sam} > {output.bed}'
+        'bedtools bamtobed -i {input.bam} > {output.bed}'
 
 rule sort_alignment_bed:
     input:
         bed=os.path.join(config['dir']['out'], 'bed', '{library}',
                          'aligned.bed')
     output:
-        bed=os.path.join(config['dir']['out'], 'bed', '{library}',
-                        'aligned.sorted.bed')
+        bed=temp(os.path.join(config['dir']['out'], 'bed', '{library}',
+                         'sorted.aligned.bed'))
     shell:
         'sort -k1,1 -k2,2n {input.bed} > {output.bed}'
-
-rule remove_annotated:
-    input:
-        bed=os.path.join(config['dir']['out'], 'bed', '{library}',
-                         'aligned.sorted.bed'),
-        ref=os.path.join(config['dir']['out'], 'annotations',
-                         'sorted.annotations.bed')
-    output:
-        bed=os.path.join(config['dir']['out'], 'bed', '{library}',
-                         'unannotated.bed')
-    shell:
-        'bedtools subtract -a {input.bed} -b {input.ref} -s -A > {output.bed}'
-
-# should still be sorted
-rule combine_unannotated:
-    input:
-        bed=expand(os.path.join(config['dir']['out'], 'bed', '{library}',
-                            'unannotated.bed'),
-                   library=LIBRARIES)
-    output:
-        bed=os.path.join(config['dir']['out'], 'bed', 'combined.bed')
-    shell:
-        'bodops -u {input.bed} > {output.bed}'
-
-rule merge_missed_alignments:
-    input:
-        bed=os.path.join(config['dir']['out'], 'bed', 'combined.bed')
-    output:
-        bed=os.path.join(config['dir']['out'], 'bed', 'merged.bed')
-    shell:
-        'bedtools merge -i {input.bed} -s -c 4,5,6 -o count,distinct,distinct '
-        '> {output.bed}'
-
+    
 rule find_closest:
     input:
         ref=os.path.join(config['dir']['out'], 'annotations',
                          'exon.annotations.bed'),
-        bed=os.path.join(config['dir']['out'], 'bed',
-                         'merged.bed')
+        bed=os.path.join(os.path.join(config['dir']['out'], 'bed', '{library}',
+                         'sorted.aligned.bed'))
     output:
-        os.path.join(config['dir']['out'], 'results', 'bedtools.closest.out')
+        temp(os.path.join(config['dir']['out'], 'results', '{library}',
+                    'bedtools.closet.out'))
     shell:
-        'bedtools closest -a {input.bed} -b {input.ref} -id -s -D ref> {output}'
+        "bedtools closest -a {input.bed} -b {input.ref} -D b -io -iu -s > {output}"
 
-rule find_matched:
+rule filter_closest:
     input:
-        os.path.join(config['dir']['out'], 'results', 'bedtools.closest.out')
+        os.path.join(config['dir']['out'], 'results', '{library}',
+                        'bedtools.closet.out')
     output:
-        os.path.join(config['dir']['out'], 'results',
-                    'matched.bedtools.closest.out')
-    shell:
-        "awk '{{if ($11 !~ /\./ ) {{ print }} }}' {input} > {output}"
-
-rule find_unmatched:
-    input:
-        os.path.join(config['dir']['out'], 'results', 'bedtools.closest.out')
-    output:
-        os.path.join(config['dir']['out'], 'results',
-                    'unmatched.bedtools.closest.out')
-    shell:
-        "awk '{{if ($11 ~ /\./) {{ print }} }}' {input} > {output}"
-
-rule filter_matched:
-    input:
-        os.path.join(config['dir']['out'], 'results',
-                    'matched.bedtools.closest.out')
-    output:
-        os.path.join(config['dir']['out'], 'results',
-                    'filtered.matched.bedtools.closest.out')
+        temp(os.path.join(config['dir']['out'], 'results', '{library}',
+                     'merged.closest.out'))
     params:
-        kb=config['params']['kb']
-    # look for distances > -kb because upstream exons in genome will be reported
-    # as negative distances
+        bp=config['params']['bp']
     shell:
-        "awk '{{if ($NF > -{params.kb}) {{ print }} }}' {input} > {output}"
+        "awk '{{if ($10 !~ /\./ && $NF <= {params.bp}) {{ print }} }}' {input} > {output}"
 
+rule combine_libraries:
+    input:
+        expand(os.path.join(config['dir']['out'], 'results', '{library}',
+                     'merged.closest.out'), library=LIBRARIES)
+    output:
+        temp(os.path.join(config['dir']['out'], 'results', 'combined.out'))
+    shell:
+        "cat {input} > {output}"
+
+# then merge
+rule group_library_by_exon:
+    input:
+        os.path.join(config['dir']['out'], 'results', 'combined.out')
+    output:
+        os.path.join(config['dir']['out'], 'results', '3_prime_alignments.out')
+    shell:
+        "bedtools groupby -i {input} -g 10 -c 1,2,3,4,6,7,8,9,10 "
+        "-o distinct,min,max,count_distinct,distinct,distinct,distinct,distinct,distinct "
+        " | cut -f2- > {output}"
