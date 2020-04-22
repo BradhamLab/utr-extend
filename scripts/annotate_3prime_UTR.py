@@ -1,4 +1,5 @@
 from collections import namedtuple
+import warnings
 
 import gffutils
 import re
@@ -25,7 +26,7 @@ def update_lengths(db, line, max_dist=5000):
     line_split = line.strip().split('\t')
     align = Alignment(chr=line_split[0],
                       start=int(line_split[1]) + 1, # bed to gff coords
-                      end=int(line_split[2]),
+                      end=int(line_split[2]) + 1,
                       strand=line_split[4],
                       exon=line_split[-1])
     exon = db[align.exon]
@@ -61,6 +62,9 @@ def update_lengths(db, line, max_dist=5000):
     present_utrs = db.children(gene.id, featuretype='three_prime_UTR')
     n_utrs = 0
     new_utr = True
+    # utrs = db.region(region=exon, strand=exon.strand,
+    #                  featuretype='three_prime_UTR')
+    # replace with db.region()?
     for each in present_utrs:
         n_utrs += 1
         # check if it's contained in current exon
@@ -79,6 +83,7 @@ def update_lengths(db, line, max_dist=5000):
                     each.end = utr.end
                 if utr.start < each.start:
                     each.start = utr.start
+                utr = each
                 new_utr = False
                 break
 
@@ -98,6 +103,14 @@ def update_lengths(db, line, max_dist=5000):
 
     if new_utr:
         db = db.add_relation(gene, utr, level=3)
+    overlapping_exons = [x for x in db.region(region=exon,
+                                              featuretype='exon',
+                                              strand=exon.strand,
+                                              completely_within=False)\
+                         if x.id != exon.id]
+    if len(overlapping_exons) > 0:
+        warnings.warn("Overlapping exons! Current expanded UTR: {}.\n\nOverlapping Exons {}".format(
+                  utr, "\n\t".join(overlapping_exons)))
 
     db = db.update([gene, exon, utr], merge_strategy='replace')
     
