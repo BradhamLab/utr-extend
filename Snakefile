@@ -36,7 +36,7 @@ def fastq_input(wildcards):
 rule all:
     input:
         os.path.join(config['dir']['out'], 'results',
-                     '3_prime_alignments.out')
+                     'updated_annotations.gff')
 
 rule gff_to_bed:
     input:
@@ -74,12 +74,13 @@ rule build_star_index:
     params:
         index_dir=config['STAR']['index'],
         chr_n_bits=utils.estimate_STAR_ChrBinNbits(config['genome']['fasta'], 60),
+        overhang=config['params']['readlength'] - 1
     output:
         os.path.join(config['STAR']['index'], 'Genome')
     shell:
         "STAR --runMode genomeGenerate --genomeDir {params.index_dir} "
         "--genomeFastaFiles {input.fasta} --sjdbGTFfile {input.gtf} "
-        "--sjdbOverhang 60 --genomeChrBinNbits {params.chr_n_bits}"
+        "--sjdbOverhang {params.overhang} --genomeChrBinNbits {params.chr_n_bits}"
 
 rule align_3_prime_utr_reads:
     input:
@@ -170,3 +171,18 @@ rule group_library_by_exon:
         "bedtools groupby -i {input} -g 10 -c 1,2,3,4,6,7,8,9,10 "
         "-o distinct,min,max,count_distinct,distinct,distinct,distinct,distinct,distinct "
         " | cut -f2- > {output}"
+
+rule update_gff:
+    input:
+        gff=config['genome']['gff'],
+        extensions=os.path.join(config['dir']['out'], 'results',
+                                '3_prime_alignments.out')
+    output:
+        gff=os.path.join(config['dir']['out'], 'results', 'updated_annotations.gff')
+    params:
+        bp=config['params']['bp']
+    script:
+        "scripts/annotate_3prime_UTR.py"
+
+
+# clean gff
